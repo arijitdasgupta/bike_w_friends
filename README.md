@@ -6,7 +6,7 @@
 
 ![image](./IMG_0141.JPEG)
 
-Wrote this as a way for me to learn Rust & RP2040. Also part of a sharable PCB project that I have been working on.
+Wrote this as a way for me to learn Rust & RP2040. Also part of a sharable [PCB project](https://dazgupta.com/journal/00020_biking_with_friends/) that I have been working on.
 
 ## Development
 
@@ -21,3 +21,4 @@ I go on bike rides with friends across Scandinavia every year with my friends. T
  - Add instructions for hooking up the buttons and displays.
  - Add how to play instructions.
  - Add start screen & play-pause?
+
