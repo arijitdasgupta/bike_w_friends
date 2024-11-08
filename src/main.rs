@@ -89,7 +89,7 @@ fn core1_task(clocks: ClocksManager) -> ! {
     );
     let interface = I2CDisplayInterface::new(i2c);
     let mut display: DisplayType =
-        Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate180)
+        Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
             .into_buffered_graphics_mode();
     display.init().unwrap();
 
