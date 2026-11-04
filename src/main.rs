@@ -5,28 +5,45 @@ mod bg;
 mod game;
 
 use core::{cell::RefCell, ops::Neg};
+use cortex_m::peripheral::NVIC;
 use critical_section::Mutex;
 use defmt::info;
 use defmt_rtt as _;
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
-use embedded_hal::{delay::DelayNs, digital::OutputPin};
+use embedded_hal::digital::OutputPin;
 use game::Game;
-use hal::fugit::RateExtU32;
+use hal::fugit::{HertzU32, RateExtU32};
 use heapless::{spsc::Queue, Vec};
 use panic_probe as _;
-use rp_pico::hal::{
-    self,
-    clocks::{init_clocks_and_plls, ClocksManager},
+use rp235x_hal::{
+    self as hal,
+    clocks::{init_clocks_and_plls, Clock},
     entry,
-    gpio::{self, FunctionI2C, Interrupt::EdgeLow, Pin},
+    gpio::{self, FunctionI2c, Interrupt::EdgeLow, Pin},
     multicore::{Multicore, Stack},
     pac::{self, interrupt},
     rosc::RingOscillator,
-    Timer, Watchdog,
+    Watchdog,
 };
 use ssd1306::{mode::BufferedGraphicsMode, prelude::*, I2CDisplayInterface, Ssd1306};
 
 use bg::Background;
+
+/// Tell the Boot ROM about our application (required to boot on RP2350).
+#[link_section = ".start_block"]
+#[used]
+pub static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
+
+/// Program metadata for `picotool info`.
+#[link_section = ".bi_entries"]
+#[used]
+pub static PICOTOOL_ENTRIES: [hal::binary_info::EntryAddr; 5] = [
+    hal::binary_info::rp_cargo_bin_name!(),
+    hal::binary_info::rp_cargo_version!(),
+    hal::binary_info::rp_program_description!(c"Bike with friends"),
+    hal::binary_info::rp_cargo_homepage_url!(),
+    hal::binary_info::rp_program_build_attribute!(),
+];
 
 pub type DisplayType = Ssd1306<
     I2CInterface<
@@ -45,12 +62,12 @@ pub type DisplayType = Ssd1306<
 type LeftBt = gpio::Pin<gpio::bank0::Gpio16, gpio::FunctionSioInput, gpio::PullUp>;
 type CenterBt = gpio::Pin<gpio::bank0::Gpio17, gpio::FunctionSioInput, gpio::PullUp>;
 type RightBt = gpio::Pin<gpio::bank0::Gpio18, gpio::FunctionSioInput, gpio::PullUp>;
-type InputButtons<'a> = (LeftBt, CenterBt, RightBt);
+type InputButtons = (LeftBt, CenterBt, RightBt);
 
 static INPUT_IRC_SHARED: Mutex<RefCell<Option<InputButtons>>> = Mutex::new(RefCell::new(None));
 
 // Stack for core1
-static mut CORE1_STACK: Stack<8192> = Stack::new();
+static CORE1_STACK: Stack<8192> = Stack::new();
 
 pub enum ButtonInput {
     Left,
@@ -61,7 +78,7 @@ pub enum ButtonInput {
 // Queue to communicate between IRQ and core1
 static mut INPUT_Q: Queue<ButtonInput, 100> = Queue::new();
 
-fn core1_task(clocks: ClocksManager) -> ! {
+fn core1_task(sys_freq: HertzU32) -> ! {
     let mut peripherals = unsafe { pac::Peripherals::steal() };
     let sio = hal::Sio::new(peripherals.SIO);
 
@@ -73,10 +90,9 @@ fn core1_task(clocks: ClocksManager) -> ! {
         &mut peripherals.RESETS,
     );
 
-    let mut timer = hal::Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
     // Configure two pins as being I²C, not GPIO
-    let sda_pin: Pin<_, FunctionI2C, _> = pins.gpio2.reconfigure();
-    let scl_pin: Pin<_, FunctionI2C, _> = pins.gpio3.reconfigure();
+    let sda_pin: Pin<_, FunctionI2c, _> = pins.gpio2.reconfigure();
+    let scl_pin: Pin<_, FunctionI2c, _> = pins.gpio3.reconfigure();
 
     // Initializing display interface, display & text style etc.
     let i2c = hal::I2C::i2c1(
@@ -85,7 +101,7 @@ fn core1_task(clocks: ClocksManager) -> ! {
         scl_pin, // Try `not_an_scl_pin` here
         1.MHz(),
         &mut peripherals.RESETS,
-        &clocks.system_clock,
+        sys_freq,
     );
     let interface = I2CDisplayInterface::new(i2c);
     let mut display: DisplayType =
@@ -124,7 +140,7 @@ fn core1_task(clocks: ClocksManager) -> ! {
 
     // Enabling interrupts
     unsafe {
-        pac::NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
+        NVIC::unmask(pac::Interrupt::IO_IRQ_BANK0);
     }
 
     info!("inited core1 & IO interrupts");
@@ -194,10 +210,11 @@ fn IO_IRQ_BANK0() {
 fn main() -> ! {
     // Core stuff & timers
     let mut peripherals = pac::Peripherals::take().unwrap();
-    let _core = pac::CorePeripherals::take().unwrap();
+    let _core = cortex_m::Peripherals::take().unwrap();
     let mut watchdog = Watchdog::new(peripherals.WATCHDOG);
     // External high-speed crystal on the pico board is 12Mhz
     let external_xtal_freq_hz = 12_000_000u32;
+
     let clocks = init_clocks_and_plls(
         external_xtal_freq_hz,
         peripherals.XOSC,
@@ -209,7 +226,8 @@ fn main() -> ! {
     )
     .ok()
     .unwrap();
-    let mut timer = Timer::new(peripherals.TIMER, &mut peripherals.RESETS, &clocks);
+
+    let sys_freq = clocks.system_clock.freq();
 
     // The single-cycle I/O block controls our GPIO pins
     let mut sio = hal::Sio::new(peripherals.SIO);
@@ -218,7 +236,7 @@ fn main() -> ! {
     let mut mc = Multicore::new(&mut peripherals.PSM, &mut peripherals.PPB, &mut sio.fifo);
     let cores = mc.cores();
     let core1 = &mut cores[1];
-    let _test = core1.spawn(unsafe { &mut CORE1_STACK.mem }, move || core1_task(clocks));
+    let _test = core1.spawn(CORE1_STACK.take().unwrap(), move || core1_task(sys_freq));
 
     info!("inited core0");
 
